@@ -1,0 +1,7 @@
+{
+  "seed": 20261005,
+  "device": "cpu",
+  "run_dir": "runs/default",
+  "sampling": {"max_items_per_player": 2, "max_initial_shell_type_count": 4,
+               "include_effects": true, "include_replenishment_boundaries": true}
+}

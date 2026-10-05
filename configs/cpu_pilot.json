@@ -1,0 +1,16 @@
+{
+  "seed": 20261005,
+  "device": "cpu",
+  "run_dir": "runs/cpu_pilot",
+  "model": {"width": 256, "layers": 8, "heads": 8, "ffn_width": 1024, "support_points": 101},
+  "sampling": {"max_items_per_player": 1, "max_initial_shell_type_count": 2,
+               "include_effects": false, "include_replenishment_boundaries": true},
+  "search": {"max_internal_nodes": 20000, "max_frontier_nodes": 200000,
+             "value_batch_size": 256, "label_buffer_size": 4096, "work_budget": 128, "memoize": true},
+  "training": {"generation_units": 20, "roots_per_unit": 4, "batch_size": 64,
+               "updates_per_unit": 4, "max_epochs_per_unit": 4,
+               "learning_rate": 0.0001, "ema_decay": 0.95,
+               "validation_roots": 4, "evaluate_every_units": 5,
+               "checkpoint_every_units": 5, "checkpoint_every_seconds": 120,
+               "max_runtime_seconds": 600, "intra_threads": 4, "inter_threads": 1}
+}

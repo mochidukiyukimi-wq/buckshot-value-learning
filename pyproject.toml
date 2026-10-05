@@ -1,0 +1,25 @@
+[build-system]
+requires = ["scikit-build-core>=0.11", "pybind11>=3.0"]
+build-backend = "scikit_build_core.build"
+
+[project]
+name = "buckshot-value-learning"
+version = "0.1.0"
+description = "Exact boundary search and Transformer value learning for fixed Buckshot rules"
+requires-python = ">=3.11"
+dependencies = ["numpy>=2.0", "torch>=2.4", "tensorboard>=2.18"]
+
+[project.optional-dependencies]
+test = ["pytest>=8.0"]
+
+[project.scripts]
+roulette = "roulette.cli:main"
+
+[tool.scikit-build]
+cmake.build-type = "Release"
+wheel.packages = ["src/roulette"]
+build-dir = "build/{wheel_tag}"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "--basetemp=build/pytest"
