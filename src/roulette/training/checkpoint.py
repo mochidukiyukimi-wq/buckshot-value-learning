@@ -14,6 +14,12 @@ from ..config import resolved_config
 
 
 CHECKPOINT_VERSION = 1
+TRAINING_OBJECTIVE = "squared_cramer"
+LEGACY_OBJECTIVE = "cross_entropy"
+
+
+def checkpoint_objective(metadata: dict) -> str:
+    return metadata.get("training_objective", LEGACY_OBJECTIVE)
 
 
 def capture_rng() -> dict:
@@ -44,17 +50,24 @@ def metadata_for(config) -> dict:
         "checkpoint_version": CHECKPOINT_VERSION,
         "input_schema": native.INPUT_SCHEMA,
         "rules_version": native.RULES_VERSION,
+        "training_objective": TRAINING_OBJECTIVE,
         "config": resolved_config(config),
     }
 
 
 def validate_checkpoint_metadata(
-    metadata: dict, config, *, allow_ema_decay_change=False
+    metadata: dict,
+    config,
+    *,
+    allow_ema_decay_change=False,
+    allow_loss_change=False,
+    allow_loss_learning_rate_change=False,
 ) -> None:
     expected = metadata_for(config)
     for key in ("checkpoint_version", "input_schema", "rules_version"):
         if metadata.get(key) != expected[key]:
             raise ValueError(f"Incompatible checkpoint {key}")
+    validate_training_objective(metadata, allow_loss_change=allow_loss_change)
     actual_config = metadata.get("config", {})
     # These limits control how far a continuation runs, not the training algorithm.
     allowed_run_changes = {
@@ -67,6 +80,14 @@ def validate_checkpoint_metadata(
     if allow_ema_decay_change:
         # Explicit EMA tuning keeps the model, data domain and optimizer settings fixed.
         allowed_run_changes.add("ema_decay")
+    if (
+        allow_loss_change
+        and allow_loss_learning_rate_change
+        and checkpoint_objective(metadata) == LEGACY_OBJECTIVE
+    ):
+        # CE's AdamW moments have a different scale. A measured LR adjustment is
+        # permitted only at the explicit CE->Cramér migration, never silently.
+        allowed_run_changes.add("learning_rate")
     old = json.loads(json.dumps(actual_config))
     new = resolved_config(config)
     for values in (old, new):
@@ -106,6 +127,7 @@ def validate_stage_transition(metadata: dict, config) -> None:
     for key in ("checkpoint_version", "input_schema", "rules_version"):
         if metadata.get(key) != expected[key]:
             raise ValueError(f"Incompatible checkpoint {key}")
+    validate_training_objective(metadata)
     previous = metadata.get("config", {})
     if previous.get("model") != expected["config"]["model"]:
         raise ValueError("A stage transition cannot change the model or support")
@@ -114,18 +136,41 @@ def validate_stage_transition(metadata: dict, config) -> None:
             raise ValueError(f"A stage transition cannot change {key}")
 
 
+def validate_training_objective(metadata: dict, *, allow_loss_change=False) -> None:
+    objective = checkpoint_objective(metadata)
+    if objective == TRAINING_OBJECTIVE:
+        return
+    if allow_loss_change and objective == LEGACY_OBJECTIVE:
+        return
+    raise ValueError(
+        "Incompatible training objective; CE continuation requires --loss-transition"
+    )
+
+
 def load_checkpoint(
-    path: str | Path, config, *, stage_transition=False, ema_decay_transition=False
+    path: str | Path,
+    config,
+    *,
+    stage_transition=False,
+    ema_decay_transition=False,
+    loss_transition=False,
+    for_inference=False,
 ) -> dict:
-    if stage_transition and ema_decay_transition:
-        raise ValueError("Stage and EMA decay transitions must be separate")
+    if sum((stage_transition, ema_decay_transition, loss_transition)) > 1:
+        raise ValueError("Training transitions must be separate")
+    if for_inference and any((stage_transition, ema_decay_transition, loss_transition)):
+        raise ValueError("Inference loading cannot apply a training transition")
     # Only load this task's locally produced files: optimizer/RNG state requires pickle.
     state = torch.load(path, map_location="cpu", weights_only=False)
     if stage_transition:
         validate_stage_transition(state["metadata"], config)
     else:
         validate_checkpoint_metadata(
-            state["metadata"], config, allow_ema_decay_change=ema_decay_transition
+            state["metadata"],
+            config,
+            allow_ema_decay_change=ema_decay_transition,
+            allow_loss_change=loss_transition or for_inference,
+            allow_loss_learning_rate_change=loss_transition,
         )
     saved_support = state["support"]
     expected_support = (

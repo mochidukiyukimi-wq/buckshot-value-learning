@@ -1,5 +1,4 @@
 import torch
-from torch.nn import functional as F
 
 
 def make_support(config, device="cpu") -> torch.Tensor:
@@ -29,13 +28,3 @@ def value_to_two_hot(values: torch.Tensor, support: torch.Tensor) -> torch.Tenso
 
 def logits_to_value(logits: torch.Tensor, support: torch.Tensor) -> torch.Tensor:
     return (torch.softmax(logits.float(), dim=-1) * support.float()).sum(dim=-1)
-
-
-def value_loss(
-    logits: torch.Tensor, target_probabilities: torch.Tensor
-) -> torch.Tensor:
-    return (
-        -(target_probabilities.detach() * F.log_softmax(logits.float(), dim=-1))
-        .sum(dim=-1)
-        .mean()
-    )

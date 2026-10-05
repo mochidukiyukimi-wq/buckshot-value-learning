@@ -36,6 +36,11 @@ def build_parser():
                 help="Explicitly change sampling/runtime while preserving model, optimizer, EMA and step",
             )
             transition.add_argument(
+                "--loss-transition",
+                action="store_true",
+                help="Migrate CE to squared Cramér, permitting a configured LR adjustment while preserving learned state",
+            )
+            transition.add_argument(
                 "--ema-decay-transition",
                 action="store_true",
                 help="Explicitly change only EMA decay while preserving learned state and validation history",
@@ -63,13 +68,14 @@ def main(argv=None):
             resume=arguments.resume,
             stage_transition=arguments.stage_transition,
             ema_decay_transition=arguments.ema_decay_transition,
+            loss_transition=arguments.loss_transition,
         )
     else:
         configure_runtime(config)
         checkpoint_path = arguments.checkpoint or str(
             Path(config.run_dir) / "latest.pt"
         )
-        saved = load_checkpoint(checkpoint_path, config)
+        saved = load_checkpoint(checkpoint_path, config, for_inference=True)
         model = build_model(config.model).to(config.device)
         model.load_state_dict(saved["model"])
         model.eval()

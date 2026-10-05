@@ -11,8 +11,8 @@ from roulette.model.encoding import encode_states
 from roulette.model.support import (
     value_to_two_hot,
     logits_to_value,
-    value_loss,
 )
+from roulette.model.squared_cramer import squared_cramer_loss
 from roulette.model.transformer import build_model
 from roulette.training.ema import initialize_ema, update_ema, freeze_teacher
 from roulette.training.teacher import evaluate_frontier, make_training_batch
@@ -67,7 +67,7 @@ def test_two_hot_preserves_mean_endpoints_and_support_points():
     assert (targets > 0).sum(-1).max() <= 2
 
 
-def test_finite_logits_endpoints_with_tolerance_and_soft_target_ce_entropy():
+def test_finite_logits_endpoints_with_tolerance_and_squared_cramer():
     support = torch.linspace(0, 1, 11)
     targets = value_to_two_hot(torch.tensor([0.0, 0.37, 1.0]), support)
     logits = targets.clamp_min(1e-15).log()
@@ -75,8 +75,7 @@ def test_finite_logits_endpoints_with_tolerance_and_soft_target_ce_entropy():
     torch.testing.assert_close(
         predictions, torch.tensor([0.0, 0.37, 1.0]), atol=1e-6, rtol=1e-6
     )
-    entropy = -(targets * targets.clamp_min(1e-15).log()).sum(-1).mean()
-    torch.testing.assert_close(value_loss(logits, targets), entropy)
+    assert squared_cramer_loss(logits, targets).item() < 1e-12
 
 
 def test_item_slot_permutation_and_batch_padding_do_not_change_prediction():
@@ -132,12 +131,12 @@ def test_fixed_teacher_labels_can_be_fitted_with_finite_gradients():
     features = torch.from_numpy(batch.features)
     values = torch.from_numpy(batch.values)
     targets = value_to_two_hot(values, support)
-    initial_loss = value_loss(model.predict_logits(features), targets).item()
+    initial_loss = squared_cramer_loss(model.predict_logits(features), targets).item()
     optimizer = torch.optim.AdamW(model.parameters(), lr=0.01)
     for _ in range(50):
         metrics = train_step(model, features, values, optimizer, support)
         assert all(np.isfinite(value) for value in metrics.values())
-    final_loss = value_loss(model.predict_logits(features), targets).item()
+    final_loss = squared_cramer_loss(model.predict_logits(features), targets).item()
     assert final_loss < initial_loss * 0.5
 
 

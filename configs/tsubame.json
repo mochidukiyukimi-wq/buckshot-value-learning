@@ -9,7 +9,7 @@
              "value_batch_size": 256, "label_buffer_size": 4096, "work_budget": 128, "memoize": true},
   "training": {"generation_units": null, "roots_per_unit": 4, "batch_size": 128,
                "updates_per_unit": 8, "max_epochs_per_unit": 2,
-               "learning_rate": 0.0001, "ema_decay": 0.99,
+               "learning_rate": 0.00001, "ema_decay": 0.99,
                "validation_roots": 16, "evaluate_every_units": 50,
                "checkpoint_every_units": 25, "checkpoint_every_seconds": 300,
                "max_runtime_seconds": 84600, "intra_threads": 2, "inter_threads": 1}

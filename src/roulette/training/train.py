@@ -12,7 +12,8 @@ import torch
 from .. import _native as native
 from ..config import native_sampling, native_search, resolved_config
 from ..evaluation.accuracy import evaluate_root_residuals
-from ..model.support import make_support, value_loss, value_to_two_hot, logits_to_value
+from ..model.support import make_support, value_to_two_hot, logits_to_value
+from ..model.squared_cramer import squared_cramer_loss
 from ..model.transformer import build_model
 from ..observability.logging import RunLogger, render_cli
 from ..observability.metrics import execution_environment
@@ -22,7 +23,10 @@ from .checkpoint import (
     metadata_for,
     restore_rng,
     save_checkpoint,
+    TRAINING_OBJECTIVE,
+    checkpoint_objective,
 )
+from .update_metrics import parameter_update_metrics
 from .ema import initialize_ema, freeze_teacher, update_ema
 from .teacher import make_training_batch
 
@@ -44,7 +48,7 @@ def train_step(model, features, values, optimizer, support) -> dict:
     optimizer.zero_grad(set_to_none=True)
     targets = value_to_two_hot(values, support)
     logits = model.predict_logits(features)
-    loss = value_loss(logits, targets)
+    loss = squared_cramer_loss(logits, targets)
     if not torch.isfinite(loss):
         raise FloatingPointError("Non-finite training loss")
     loss.backward()
@@ -52,26 +56,32 @@ def train_step(model, features, values, optimizer, support) -> dict:
         if parameter.grad is not None and not torch.isfinite(parameter.grad).all():
             raise FloatingPointError("Non-finite gradient; optimizer was not updated")
     gradient_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), 10.0)
+    parameters = list(model.parameters())
+    previous_parameters = [parameter.detach().clone() for parameter in parameters]
     optimizer.step()
     with torch.no_grad():
         predictions = logits_to_value(logits, support)
-        entropy = -(targets * targets.clamp_min(1e-30).log()).sum(-1).mean()
         return {
-            "cross_entropy": loss.item(),
+            "squared_cramer": loss.item(),
             "value_mse": torch.square(predictions - values).mean().item(),
-            "teacher_entropy": entropy.item(),
-            "excess_cross_entropy": (loss - entropy).item(),
             "gradient_norm": gradient_norm.item(),
+            "learning_rate": optimizer.param_groups[0]["lr"],
+            **parameter_update_metrics(parameters, previous_parameters),
         }
 
 
 def run_training(
-    config, resume=False, *, stage_transition=False, ema_decay_transition=False
+    config,
+    resume=False,
+    *,
+    stage_transition=False,
+    ema_decay_transition=False,
+    loss_transition=False,
 ) -> dict:
-    if (stage_transition or ema_decay_transition) and not resume:
+    if (stage_transition or ema_decay_transition or loss_transition) and not resume:
         raise ValueError("A training transition requires --resume")
-    if stage_transition and ema_decay_transition:
-        raise ValueError("Stage and EMA decay transitions must be separate")
+    if sum((stage_transition, ema_decay_transition, loss_transition)) > 1:
+        raise ValueError("Training transitions must be separate")
     configure_runtime(config)
     random.seed(config.seed)
     np.random.seed(config.seed % (2**32))
@@ -94,12 +104,14 @@ def run_training(
     stage_lineage = []
     training_adjustments = []
     ema_decay_adjustment = None
+    loss_adjustment = None
     if resume:
         saved = load_checkpoint(
             checkpoint_path,
             config,
             stage_transition=stage_transition,
             ema_decay_transition=ema_decay_transition,
+            loss_transition=loss_transition,
         )
         model.load_state_dict(saved["model"])
         ema.load_state_dict(saved["ema"])
@@ -110,6 +122,26 @@ def run_training(
         validation_history = saved["validation_history"]
         stage_lineage = saved.get("stage_lineage", [])
         training_adjustments = saved.get("training_adjustments", [])
+        previous_objective = checkpoint_objective(saved["metadata"])
+        if loss_transition and previous_objective != TRAINING_OBJECTIVE:
+            previous_learning_rate = saved["metadata"]["config"]["training"][
+                "learning_rate"
+            ]
+            for parameter_group in optimizer.param_groups:
+                parameter_group["lr"] = config.training.learning_rate
+            loss_adjustment = {
+                "parameter": "training_objective",
+                "previous_value": previous_objective,
+                "new_value": TRAINING_OBJECTIVE,
+                "step": step,
+                "completed_units": completed_units,
+                "timestamp": time.time(),
+                "learning_rate": {
+                    "previous_value": previous_learning_rate,
+                    "new_value": config.training.learning_rate,
+                },
+            }
+            training_adjustments.append(loss_adjustment)
         previous_ema_decay = saved["metadata"]["config"]["training"]["ema_decay"]
         if ema_decay_transition and previous_ema_decay != config.training.ema_decay:
             ema_decay_adjustment = {
@@ -214,6 +246,8 @@ def run_training(
                 "resume": resume,
                 "stage_transition": stage_transition,
                 "ema_decay_transition": ema_decay_transition,
+                "loss_transition": loss_transition,
+                "training_objective": TRAINING_OBJECTIVE,
                 "step": step,
                 "rules_version": native.RULES_VERSION,
                 "input_schema": native.INPUT_SCHEMA,
@@ -226,6 +260,8 @@ def run_training(
         )
         if ema_decay_adjustment is not None:
             logger.write_jsonl({"event": "training_adjustment", **ema_decay_adjustment})
+        if loss_adjustment is not None:
+            logger.write_jsonl({"event": "training_adjustment", **loss_adjustment})
         save("initial" if not resume else "resume")
         if not validation_history:
             validation, validation_keys = evaluate_root_residuals(

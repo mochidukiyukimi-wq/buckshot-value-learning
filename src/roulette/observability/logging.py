@@ -36,8 +36,10 @@ def render_cli(event: dict) -> None:
         f"elapsed={event['elapsed_seconds']:.1f}s "
         f"MAE={validation.get('mae', float('nan')):.5f} "
         f"P99={validation.get('p99', float('nan')):.5f} "
+        f"val_MSE={validation.get('mse', float('nan')):.6g} "
+        f"max={validation.get('maximum_error', float('nan')):.5f} "
         f"val_step={validation.get('model_version', 0)} "
-        f"CE={event.get('cross_entropy', 0):.4f} "
+        f"Cramer2={event.get('squared_cramer', 0):.6g} "
         f"MSE={event.get('value_mse', 0):.5f} "
         f"roots={event['root_count']} labels={event['teacher_rows']} "
         f"rows/s={event.get('inference_rows_per_second', 0):.0f}",

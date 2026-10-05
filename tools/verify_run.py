@@ -18,7 +18,7 @@ from roulette.evaluation.matches import (
     evaluate_matches,
 )
 from roulette.model.transformer import build_model
-from roulette.training.checkpoint import load_checkpoint
+from roulette.training.checkpoint import load_checkpoint, checkpoint_objective
 from roulette.training.train import configure_runtime
 
 
@@ -27,7 +27,8 @@ def verify_run(config_path):
     configure_runtime(config)
     directory = Path(config.run_dir)
     checkpoint_path = directory / "latest.pt"
-    saved = load_checkpoint(checkpoint_path, config)
+    saved = load_checkpoint(checkpoint_path, config, for_inference=True)
+    loss_tag = "training/" + checkpoint_objective(saved["metadata"])
     if list(directory.glob("*.pt")) != [checkpoint_path]:
         raise RuntimeError(
             "Run directory contains checkpoint history instead of just latest.pt"
@@ -44,10 +45,7 @@ def verify_run(config_path):
     training_events = [event for event in events if event["event"] == "training"]
     tensorboard = EventAccumulator(str(directory / "tensorboard")).Reload()
     scalar_tags = tensorboard.Tags()["scalars"]
-    if (
-        "validation/mae" not in scalar_tags
-        or "training/cross_entropy" not in scalar_tags
-    ):
+    if "validation/mae" not in scalar_tags or loss_tag not in scalar_tags:
         raise RuntimeError("Required TensorBoard series are missing")
     model = build_model(config.model).to(config.device)
     model.load_state_dict(saved["model"])
@@ -98,9 +96,8 @@ def verify_run(config_path):
         ],
         "tensorboard_scalar_tags": scalar_tags,
         "tensorboard_validation_count": len(tensorboard.Scalars("validation/mae")),
-        "tensorboard_cross_entropy_count": len(
-            tensorboard.Scalars("training/cross_entropy")
-        ),
+        "tensorboard_loss_tag": loss_tag,
+        "tensorboard_loss_count": len(tensorboard.Scalars(loss_tag)),
         "learned_model_tactical_matches": tactical_matches,
         "simulator_baseline_full_games": baseline_matches,
         "strength_limit": "Tactical-case wins and baseline full games do not establish learned model strength from normal starts",

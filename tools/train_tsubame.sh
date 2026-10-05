@@ -5,8 +5,8 @@ cd "$(dirname "$0")/.."
 mkdir -p runs/tsubame
 
 resume_option=${1:-}
-if [[ $# -gt 1 || ( -n "$resume_option" && "$resume_option" != --ema-decay-transition ) ]]; then
-    echo "Usage: tools/train_tsubame.sh [--ema-decay-transition]" >&2
+if [[ $# -gt 1 || ( -n "$resume_option" && "$resume_option" != --ema-decay-transition && "$resume_option" != --loss-transition ) ]]; then
+    echo "Usage: tools/train_tsubame.sh [--ema-decay-transition|--loss-transition]" >&2
     exit 2
 fi
 
@@ -33,7 +33,11 @@ saved = torch.load('runs/tsubame/latest.pt', map_location='cpu', weights_only=Fa
 try:
     validate_checkpoint_metadata(saved['metadata'], config)
 except ValueError:
-    if sys.argv[2] == '--ema-decay-transition':
+    if sys.argv[2] == '--loss-transition':
+        validate_checkpoint_metadata(saved['metadata'], config, allow_loss_change=True,
+                                     allow_loss_learning_rate_change=True)
+        print('loss-transition')
+    elif sys.argv[2] == '--ema-decay-transition':
         validate_checkpoint_metadata(saved['metadata'], config, allow_ema_decay_change=True)
         print('ema-decay-transition')
     else:
