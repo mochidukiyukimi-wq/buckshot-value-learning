@@ -29,10 +29,16 @@ def build_parser():
         command.add_argument("--run-dir")
         if name == "train":
             command.add_argument("--resume", action="store_true")
-            command.add_argument(
+            transition = command.add_mutually_exclusive_group()
+            transition.add_argument(
                 "--stage-transition",
                 action="store_true",
                 help="Explicitly change sampling/runtime while preserving model, optimizer, EMA and step",
+            )
+            transition.add_argument(
+                "--ema-decay-transition",
+                action="store_true",
+                help="Explicitly change only EMA decay while preserving learned state and validation history",
             )
         else:
             command.add_argument("--checkpoint")
@@ -53,7 +59,10 @@ def main(argv=None):
     config = load_config(arguments.config, overrides)
     if arguments.command == "train":
         result = run_training(
-            config, resume=arguments.resume, stage_transition=arguments.stage_transition
+            config,
+            resume=arguments.resume,
+            stage_transition=arguments.stage_transition,
+            ema_decay_transition=arguments.ema_decay_transition,
         )
     else:
         configure_runtime(config)

@@ -4,9 +4,15 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 mkdir -p runs/tsubame
 
+resume_option=${1:-}
+if [[ $# -gt 1 || ( -n "$resume_option" && "$resume_option" != --ema-decay-transition ) ]]; then
+    echo "Usage: tools/train_tsubame.sh [--ema-decay-transition]" >&2
+    exit 2
+fi
+
 # Keep five minutes for an orderly stop and final write before scheduler termination.
 allocation_deadline=${BUCKSHOT_ALLOCATION_DEADLINE:?Set the allocated job deadline in Unix seconds}
-resume_mode=$(.venv/bin/python - "$allocation_deadline" <<'PY'
+resume_mode=$(.venv/bin/python - "$allocation_deadline" "$resume_option" <<'PY'
 import json
 from pathlib import Path
 import sys
@@ -27,10 +33,14 @@ saved = torch.load('runs/tsubame/latest.pt', map_location='cpu', weights_only=Fa
 try:
     validate_checkpoint_metadata(saved['metadata'], config)
 except ValueError:
-    # Only the imported CPU checkpoint may enter a new stage automatically.
-    if saved['metadata']['config']['device'] != 'cpu':
-        raise
-    print('stage-transition')
+    if sys.argv[2] == '--ema-decay-transition':
+        validate_checkpoint_metadata(saved['metadata'], config, allow_ema_decay_change=True)
+        print('ema-decay-transition')
+    else:
+        # Only the imported CPU checkpoint may enter a new stage automatically.
+        if saved['metadata']['config']['device'] != 'cpu':
+            raise
+        print('stage-transition')
 else:
     print('resume')
 PY
@@ -40,9 +50,9 @@ export OMP_NUM_THREADS=2
 export MKL_NUM_THREADS=2
 export PYTHONUNBUFFERED=1
 
-# The first GPU launch explicitly broadens the data domain; later launches use strict resume.
-if [[ "$resume_mode" == stage-transition ]]; then
-    .venv/bin/python -m roulette train --config runs/tsubame/launch_config.json --resume --stage-transition
-else
-    .venv/bin/python -m roulette train --config runs/tsubame/launch_config.json --resume
+# The wrapper names any permitted transition; routine continuation stays strict.
+resume_arguments=(--resume)
+if [[ "$resume_mode" != resume ]]; then
+    resume_arguments+=("--$resume_mode")
 fi
+.venv/bin/python -m roulette train --config runs/tsubame/launch_config.json "${resume_arguments[@]}"

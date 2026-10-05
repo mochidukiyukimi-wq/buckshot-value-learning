@@ -48,7 +48,9 @@ def metadata_for(config) -> dict:
     }
 
 
-def validate_checkpoint_metadata(metadata: dict, config) -> None:
+def validate_checkpoint_metadata(
+    metadata: dict, config, *, allow_ema_decay_change=False
+) -> None:
     expected = metadata_for(config)
     for key in ("checkpoint_version", "input_schema", "rules_version"):
         if metadata.get(key) != expected[key]:
@@ -62,6 +64,9 @@ def validate_checkpoint_metadata(metadata: dict, config) -> None:
         "checkpoint_every_seconds",
         "evaluate_every_units",
     }
+    if allow_ema_decay_change:
+        # Explicit EMA tuning keeps the model, data domain and optimizer settings fixed.
+        allowed_run_changes.add("ema_decay")
     old = json.loads(json.dumps(actual_config))
     new = resolved_config(config)
     for values in (old, new):
@@ -109,13 +114,19 @@ def validate_stage_transition(metadata: dict, config) -> None:
             raise ValueError(f"A stage transition cannot change {key}")
 
 
-def load_checkpoint(path: str | Path, config, *, stage_transition=False) -> dict:
+def load_checkpoint(
+    path: str | Path, config, *, stage_transition=False, ema_decay_transition=False
+) -> dict:
+    if stage_transition and ema_decay_transition:
+        raise ValueError("Stage and EMA decay transitions must be separate")
     # Only load this task's locally produced files: optimizer/RNG state requires pickle.
     state = torch.load(path, map_location="cpu", weights_only=False)
     if stage_transition:
         validate_stage_transition(state["metadata"], config)
     else:
-        validate_checkpoint_metadata(state["metadata"], config)
+        validate_checkpoint_metadata(
+            state["metadata"], config, allow_ema_decay_change=ema_decay_transition
+        )
     saved_support = state["support"]
     expected_support = (
         torch.arange(config.model.support_points, dtype=torch.float64)

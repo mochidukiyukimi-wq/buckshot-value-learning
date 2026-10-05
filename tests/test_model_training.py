@@ -336,3 +336,120 @@ def test_resume_without_count_limit_passes_previous_limit_and_saves_on_stop(
     assert summary["status"] == "interrupted"
     assert saved["save_reason"] == "exit_interrupted"
     assert saved["metadata"]["config"]["training"]["generation_units"] is None
+
+
+def assert_checkpoint_values_equal(expected, actual):
+    if isinstance(expected, torch.Tensor):
+        assert torch.equal(expected, actual)
+    elif isinstance(expected, np.ndarray):
+        np.testing.assert_array_equal(expected, actual)
+    elif isinstance(expected, dict):
+        assert expected.keys() == actual.keys()
+        for key in expected:
+            assert_checkpoint_values_equal(expected[key], actual[key])
+    elif isinstance(expected, (list, tuple)):
+        assert len(expected) == len(actual)
+        for expected_value, actual_value in zip(expected, actual, strict=True):
+            assert_checkpoint_values_equal(expected_value, actual_value)
+    else:
+        assert expected == actual
+
+
+def test_ema_decay_transition_preserves_state_then_uses_new_decay(
+    tmp_path, monkeypatch
+):
+    from roulette.training import train as train_module
+
+    original = tiny_config(tmp_path, units=1)
+    run_training(original)
+    before = load_checkpoint(tmp_path / "latest.pt", original)
+    changed = deepcopy(original)
+    changed.training.ema_decay = 0.99
+    with pytest.raises(ValueError, match="differs"):
+        load_checkpoint(tmp_path / "latest.pt", changed)
+    summary = run_training(changed, resume=True, ema_decay_transition=True)
+    after = load_checkpoint(tmp_path / "latest.pt", changed)
+    assert summary["initial_step"] == summary["step"] == before["step"]
+    for field in ("model", "ema", "optimizer", "rng", "support", "validation_history"):
+        assert_checkpoint_values_equal(before[field], after[field])
+    adjustment = after["training_adjustments"][0]
+    assert len(after["training_adjustments"]) == 1
+    assert adjustment["parameter"] == "ema_decay"
+    assert adjustment["previous_value"] == original.training.ema_decay
+    assert adjustment["new_value"] == 0.99
+    assert adjustment["step"] == before["step"]
+    assert adjustment["completed_units"] == before["completed_units"]
+    assert after["metadata"]["config"]["training"]["ema_decay"] == 0.99
+    events = [
+        json.loads(line)
+        for line in (tmp_path / "metrics.jsonl").read_text().splitlines()
+    ]
+    assert sum(event["event"] == "training_adjustment" for event in events) == 1
+
+    applied_decays = []
+    original_update_ema = train_module.update_ema
+
+    def check_new_ema_formula(ema, model, decay):
+        previous_parameters = [parameter.clone() for parameter in ema.parameters()]
+        original_update_ema(ema, model, decay)
+        applied_decays.append(decay)
+        for previous, current, averaged in zip(
+            previous_parameters, model.parameters(), ema.parameters(), strict=True
+        ):
+            torch.testing.assert_close(averaged, 0.99 * previous + 0.01 * current)
+
+    monkeypatch.setattr(train_module, "update_ema", check_new_ema_formula)
+    changed.training.generation_units = 2
+    continued = run_training(changed, resume=True)
+    latest = load_checkpoint(tmp_path / "latest.pt", changed)
+    assert continued["initial_step"] == before["step"]
+    assert continued["step"] > before["step"]
+    assert applied_decays == [0.99]
+    assert latest["training_adjustments"] == after["training_adjustments"]
+    assert len(list(tmp_path.glob("*.pt"))) == 1
+
+
+@pytest.mark.parametrize(
+    "configuration_field,new_value",
+    [
+        ("training.learning_rate", 0.0002),
+        ("sampling.max_initial_shell_type_count", 2),
+        ("model.support_points", 21),
+        ("seed", 123),
+        ("device", "cuda"),
+    ],
+)
+def test_ema_decay_transition_rejects_other_configuration_changes(
+    tmp_path, configuration_field, new_value
+):
+    original = tiny_config(tmp_path, units=1)
+    run_training(original)
+    changed = deepcopy(original)
+    changed.training.ema_decay = 0.99
+    field_parts = configuration_field.split(".")
+    target = changed
+    for field in field_parts[:-1]:
+        target = getattr(target, field)
+    setattr(target, field_parts[-1], new_value)
+    with pytest.raises(ValueError, match="differs"):
+        load_checkpoint(tmp_path / "latest.pt", changed, ema_decay_transition=True)
+
+
+def test_ema_decay_transition_requires_resume_and_separate_stage(tmp_path):
+    from roulette.cli import build_parser
+
+    config = tiny_config(tmp_path)
+    with pytest.raises(ValueError, match="requires --resume"):
+        run_training(config, ema_decay_transition=True)
+    with pytest.raises(ValueError, match="must be separate"):
+        run_training(
+            config, resume=True, stage_transition=True, ema_decay_transition=True
+        )
+    with pytest.raises(SystemExit):
+        build_parser().parse_args(
+            ["train", "--resume", "--stage-transition", "--ema-decay-transition"]
+        )
+    arguments = build_parser().parse_args(
+        ["train", "--resume", "--ema-decay-transition"]
+    )
+    assert arguments.resume and arguments.ema_decay_transition

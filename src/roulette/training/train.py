@@ -65,9 +65,13 @@ def train_step(model, features, values, optimizer, support) -> dict:
         }
 
 
-def run_training(config, resume=False, *, stage_transition=False) -> dict:
-    if stage_transition and not resume:
-        raise ValueError("A stage transition requires --resume")
+def run_training(
+    config, resume=False, *, stage_transition=False, ema_decay_transition=False
+) -> dict:
+    if (stage_transition or ema_decay_transition) and not resume:
+        raise ValueError("A training transition requires --resume")
+    if stage_transition and ema_decay_transition:
+        raise ValueError("Stage and EMA decay transitions must be separate")
     configure_runtime(config)
     random.seed(config.seed)
     np.random.seed(config.seed % (2**32))
@@ -88,9 +92,14 @@ def run_training(config, resume=False, *, stage_transition=False) -> dict:
     step, completed_units = 0, 0
     validation_history = []
     stage_lineage = []
+    training_adjustments = []
+    ema_decay_adjustment = None
     if resume:
         saved = load_checkpoint(
-            checkpoint_path, config, stage_transition=stage_transition
+            checkpoint_path,
+            config,
+            stage_transition=stage_transition,
+            ema_decay_transition=ema_decay_transition,
         )
         model.load_state_dict(saved["model"])
         ema.load_state_dict(saved["ema"])
@@ -100,6 +109,18 @@ def run_training(config, resume=False, *, stage_transition=False) -> dict:
         step, completed_units = saved["step"], saved["completed_units"]
         validation_history = saved["validation_history"]
         stage_lineage = saved.get("stage_lineage", [])
+        training_adjustments = saved.get("training_adjustments", [])
+        previous_ema_decay = saved["metadata"]["config"]["training"]["ema_decay"]
+        if ema_decay_transition and previous_ema_decay != config.training.ema_decay:
+            ema_decay_adjustment = {
+                "parameter": "ema_decay",
+                "previous_value": previous_ema_decay,
+                "new_value": config.training.ema_decay,
+                "step": step,
+                "completed_units": completed_units,
+                "timestamp": time.time(),
+            }
+            training_adjustments.append(ema_decay_adjustment)
         if stage_transition:
             stage_lineage.append(
                 {
@@ -153,6 +174,7 @@ def run_training(config, resume=False, *, stage_transition=False) -> dict:
                 "environment": environment,
                 "save_reason": reason,
                 "stage_lineage": stage_lineage,
+                "training_adjustments": training_adjustments,
             },
         )
         last_checkpoint = time.monotonic()
@@ -191,6 +213,7 @@ def run_training(config, resume=False, *, stage_transition=False) -> dict:
                 "event": "start",
                 "resume": resume,
                 "stage_transition": stage_transition,
+                "ema_decay_transition": ema_decay_transition,
                 "step": step,
                 "rules_version": native.RULES_VERSION,
                 "input_schema": native.INPUT_SCHEMA,
@@ -201,6 +224,8 @@ def run_training(config, resume=False, *, stage_transition=False) -> dict:
                 ),
             }
         )
+        if ema_decay_adjustment is not None:
+            logger.write_jsonl({"event": "training_adjustment", **ema_decay_adjustment})
         save("initial" if not resume else "resume")
         if not validation_history:
             validation, validation_keys = evaluate_root_residuals(
