@@ -1,5 +1,6 @@
 #pragma once
 #include "ammo_belief.hpp"
+#include "feature_schema.hpp"
 
 namespace roulette {
 struct PlayerState {
@@ -11,7 +12,7 @@ struct PlayerState {
     bool operator==(const PlayerState &) const = default;
 };
 struct State {
-    std::array<PlayerState, 2> players{};
+    std::array<PlayerState, player_count> players{};
     PlayerId actor = 0;
     AmmoBelief ammo = make_reload_belief(1, 1);
     bool operator==(const State &) const = default;

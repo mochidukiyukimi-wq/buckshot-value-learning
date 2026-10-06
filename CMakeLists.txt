@@ -5,7 +5,7 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 find_package(Python COMPONENTS Interpreter Development.Module REQUIRED)
 find_package(pybind11 CONFIG REQUIRED)
 add_library(roulette_core STATIC
-    cpp/src/ammo_belief.cpp cpp/src/chance.cpp cpp/src/rules.cpp
+    cpp/src/ammo_belief.cpp cpp/src/chance.cpp cpp/src/rules.cpp cpp/src/state_features.cpp
     cpp/src/sampling.cpp cpp/src/state_key.cpp cpp/src/search_session.cpp
     cpp/src/backup.cpp cpp/src/shortcuts.cpp)
 target_include_directories(roulette_core PUBLIC cpp/include)

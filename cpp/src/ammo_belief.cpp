@@ -21,9 +21,10 @@ std::uint64_t total_weight(const AmmoBelief &belief) {
     return total;
 }
 void validate_belief(const AmmoBelief &belief, bool allow_empty) {
-    if (belief.rounds < 0 || belief.rounds > 8 || (!allow_empty && belief.rounds == 0))
+    if (belief.rounds < 0 || belief.rounds > max_round_count ||
+        (!allow_empty && belief.rounds == 0))
         throw std::invalid_argument("round count must be 1..8 for a decision state");
-    for (int live = 0; live <= 8; ++live) {
+    for (int live = 0; live <= max_round_count; ++live) {
         for (int current = 0; current <= 1; ++current) {
             const bool feasible = belief.rounds > 0 && live <= belief.rounds && live >= current &&
                                   belief.rounds - live >= 1 - current;
@@ -45,7 +46,7 @@ AmmoBelief canonicalize_belief(AmmoBelief belief) {
     return belief;
 }
 AmmoBelief make_reload_belief(int live, int blank) {
-    if (live < 0 || blank < 0 || live + blank < 1 || live + blank > 8)
+    if (live < 0 || blank < 0 || live + blank < 1 || live + blank > max_round_count)
         throw std::invalid_argument("invalid ammunition counts");
     AmmoBelief belief;
     belief.rounds = live + blank;
@@ -57,7 +58,7 @@ AmmoBelief invert_current_round(const AmmoBelief &belief) {
     validate_belief(belief);
     AmmoBelief inverted;
     inverted.rounds = belief.rounds;
-    for (int live = 0; live <= 8; ++live) {
+    for (int live = 0; live <= max_round_count; ++live) {
         for (int current = 0; current <= 1; ++current) {
             const auto weight = belief.weights[2 * live + current];
             if (!weight)
@@ -75,7 +76,7 @@ std::pair<double, AmmoBelief> observe_current_round(const AmmoBelief &belief, Ro
     if (current < 0 || current > 1)
         throw std::invalid_argument("invalid round type");
     AmmoBelief posterior = belief;
-    for (int live = 0; live <= 8; ++live)
+    for (int live = 0; live <= max_round_count; ++live)
         posterior.weights[2 * live + 1 - current] = 0;
     const auto observed_weight = total_weight(posterior);
     if (!observed_weight)
@@ -90,7 +91,7 @@ AmmoBelief consume_current_round(const AmmoBelief &belief) {
     if (!next.rounds)
         return next;
     // All hypotheses share the same denominator n-1. Integer numerators preserve exact keys.
-    for (int live = 0; live <= 8; ++live) {
+    for (int live = 0; live <= max_round_count; ++live) {
         for (int current = 0; current <= 1; ++current) {
             const auto weight = belief.weights[2 * live + current];
             if (!weight)

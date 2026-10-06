@@ -35,30 +35,6 @@ State swap_players(State state) {
     state.actor = other_player(state.actor);
     return state;
 }
-std::array<float, feature_count> state_features(const State &state) {
-    validate_state(state);
-    std::array<float, feature_count> features{};
-    features[0] = static_cast<float>(state.ammo.rounds) / 8;
-    const double mass = static_cast<double>(total_weight(state.ammo));
-    if (mass > 0)
-        for (int index = 0; index < 18; ++index)
-            features[index + 1] = static_cast<float>(state.ammo.weights[index] / mass);
-    for (int owner = 0; owner < 2; ++owner) {
-        const auto &player = state.players[owner == 0 ? state.actor : other_player(state.actor)];
-        const int offset = 19 + owner * 5;
-        features[offset] = static_cast<float>(player.hp) / hp_limit;
-        features[offset + 1] =
-            static_cast<float>(inventory_size(player.inventory)) / inventory_limit;
-        features[offset + 2] = player.knife;
-        features[offset + 3] = player.skip_opponent;
-        features[offset + 4] = player.cuff_blocked;
-        int slot = 0;
-        for (int item = 0; item < item_count; ++item)
-            for (int count = 0; count < player.inventory[item]; ++count)
-                features[29 + owner * 7 + slot++] = static_cast<float>(item + 1);
-    }
-    return features;
-}
 Action make_shot(ShotTarget target) {
     Action action;
     action.target = target;

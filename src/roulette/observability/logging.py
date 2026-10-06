@@ -12,6 +12,12 @@ class RunLogger:
         self.jsonl = (self.directory / "metrics.jsonl").open("a", encoding="utf-8")
         self.tensorboard = SummaryWriter(str(self.directory / "tensorboard"))
 
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc_value, traceback):
+        self.close()
+
     def write_jsonl(self, event: dict) -> None:
         self.jsonl.write(
             json.dumps({"timestamp": time.time(), **event}, allow_nan=False) + "\n"
@@ -23,6 +29,47 @@ class RunLogger:
             if isinstance(value, (int, float)):
                 self.tensorboard.add_scalar(f"{prefix}/{name}", value, step)
         self.tensorboard.flush()
+
+    def record_start(self, metadata, training_state, environment, resume) -> None:
+        self.write_jsonl(
+            {
+                "event": "start",
+                "resume": resume,
+                "step": training_state.step,
+                "training_objective": metadata["training_objective"],
+                "rules_version": metadata["rules_version"],
+                "input_schema": metadata["input_schema"],
+                "environment": environment,
+                "config": metadata["config"],
+                "parameter_count": sum(
+                    parameter.numel() for parameter in training_state.model.parameters()
+                ),
+            }
+        )
+
+    def record_generation(
+        self,
+        training_state,
+        batch,
+        update_metrics,
+        validation_keys,
+        elapsed_seconds,
+        epochs_started,
+    ) -> None:
+        event = {
+            "event": "training",
+            "generation_unit": training_state.completed_units,
+            "step": training_state.step,
+            "elapsed_seconds": elapsed_seconds,
+            **update_metrics,
+            **batch.metrics.summarize_interval(),
+            "validation": training_state.validation_history[-1],
+            "validation_internal_key_overlap": len(set(batch.keys) & validation_keys),
+            "epochs_started": epochs_started,
+        }
+        self.write_jsonl(event)
+        self.write_tensorboard(update_metrics, training_state.step)
+        render_cli(event)
 
     def close(self) -> None:
         self.tensorboard.close()

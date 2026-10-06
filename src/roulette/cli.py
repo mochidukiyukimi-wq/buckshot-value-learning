@@ -15,7 +15,8 @@ from .evaluation.benchmark import benchmark_pipeline
 from .evaluation.matches import RandomAgent, SearchAgent, evaluate_matches
 from .model.transformer import build_model
 from .training.checkpoint import load_checkpoint
-from .training.train import configure_runtime, run_training
+from .runtime import configure_runtime
+from .training.train import run_training
 
 
 def build_parser():
@@ -29,22 +30,6 @@ def build_parser():
         command.add_argument("--run-dir")
         if name == "train":
             command.add_argument("--resume", action="store_true")
-            transition = command.add_mutually_exclusive_group()
-            transition.add_argument(
-                "--stage-transition",
-                action="store_true",
-                help="Explicitly change sampling/runtime while preserving model, optimizer, EMA and step",
-            )
-            transition.add_argument(
-                "--loss-transition",
-                action="store_true",
-                help="Migrate CE to squared Cramér, permitting a configured LR adjustment while preserving learned state",
-            )
-            transition.add_argument(
-                "--ema-decay-transition",
-                action="store_true",
-                help="Explicitly change only EMA decay while preserving learned state and validation history",
-            )
         else:
             command.add_argument("--checkpoint")
             command.add_argument("--output")
@@ -63,19 +48,13 @@ def main(argv=None):
     overrides = {"run_dir": arguments.run_dir} if arguments.run_dir else None
     config = load_config(arguments.config, overrides)
     if arguments.command == "train":
-        result = run_training(
-            config,
-            resume=arguments.resume,
-            stage_transition=arguments.stage_transition,
-            ema_decay_transition=arguments.ema_decay_transition,
-            loss_transition=arguments.loss_transition,
-        )
+        result = run_training(config, resume=arguments.resume)
     else:
         configure_runtime(config)
         checkpoint_path = arguments.checkpoint or str(
             Path(config.run_dir) / "latest.pt"
         )
-        saved = load_checkpoint(checkpoint_path, config, for_inference=True)
+        saved = load_checkpoint(checkpoint_path, config)
         model = build_model(config.model).to(config.device)
         model.load_state_dict(saved["model"])
         model.eval()

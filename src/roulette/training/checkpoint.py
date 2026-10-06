@@ -1,6 +1,6 @@
-"""Only latest.pt is retained. Atomic replacement preserves the previous valid checkpoint."""
+"""Persist and restore the current training state in one atomic latest.pt file."""
 
-import json
+from copy import deepcopy
 import os
 from pathlib import Path
 import random
@@ -10,16 +10,12 @@ import numpy as np
 import torch
 
 from .. import _native as native
-from ..config import resolved_config
+from ..config import Config, resolved_config
+from .learner import TrainingState
 
 
 CHECKPOINT_VERSION = 1
 TRAINING_OBJECTIVE = "squared_cramer"
-LEGACY_OBJECTIVE = "cross_entropy"
-
-
-def checkpoint_objective(metadata: dict) -> str:
-    return metadata.get("training_objective", LEGACY_OBJECTIVE)
 
 
 def capture_rng() -> dict:
@@ -45,7 +41,7 @@ def restore_rng(state: dict) -> None:
         torch.cuda.set_rng_state_all(state["cuda"])
 
 
-def metadata_for(config) -> dict:
+def metadata_for(config: Config) -> dict:
     return {
         "checkpoint_version": CHECKPOINT_VERSION,
         "input_schema": native.INPUT_SCHEMA,
@@ -55,46 +51,31 @@ def metadata_for(config) -> dict:
     }
 
 
-def validate_checkpoint_metadata(
-    metadata: dict,
-    config,
-    *,
-    allow_ema_decay_change=False,
-    allow_loss_change=False,
-    allow_loss_learning_rate_change=False,
-) -> None:
+def validate_checkpoint_metadata(metadata: dict, config: Config) -> None:
     expected = metadata_for(config)
-    for key in ("checkpoint_version", "input_schema", "rules_version"):
+    for key in (
+        "checkpoint_version",
+        "input_schema",
+        "rules_version",
+        "training_objective",
+    ):
         if metadata.get(key) != expected[key]:
             raise ValueError(f"Incompatible checkpoint {key}")
-    validate_training_objective(metadata, allow_loss_change=allow_loss_change)
-    actual_config = metadata.get("config", {})
-    # These limits control how far a continuation runs, not the training algorithm.
-    allowed_run_changes = {
+    actual_config = deepcopy(metadata["config"])
+    expected_config = expected["config"]
+    # Run duration and reporting schedules can change without changing learned state.
+    run_settings = {
         "generation_units",
         "max_runtime_seconds",
         "checkpoint_every_units",
         "checkpoint_every_seconds",
         "evaluate_every_units",
     }
-    if allow_ema_decay_change:
-        # Explicit EMA tuning keeps the model, data domain and optimizer settings fixed.
-        allowed_run_changes.add("ema_decay")
-    if (
-        allow_loss_change
-        and allow_loss_learning_rate_change
-        and checkpoint_objective(metadata) == LEGACY_OBJECTIVE
-    ):
-        # CE's AdamW moments have a different scale. A measured LR adjustment is
-        # permitted only at the explicit CE->Cramér migration, never silently.
-        allowed_run_changes.add("learning_rate")
-    old = json.loads(json.dumps(actual_config))
-    new = resolved_config(config)
-    for values in (old, new):
+    for values in (actual_config, expected_config):
         values.pop("run_dir", None)
-        for key in allowed_run_changes:
-            values.get("training", {}).pop(key, None)
-    if old != new:
+        for key in run_settings:
+            values["training"].pop(key, None)
+    if actual_config != expected_config:
         raise ValueError(
             "Checkpoint configuration differs from model, sampling, seed or learning settings"
         )
@@ -121,64 +102,16 @@ def save_checkpoint(path: str | Path, state: dict) -> None:
             os.unlink(temporary_path)
 
 
-def validate_stage_transition(metadata: dict, config) -> None:
-    """Permit an explicit new data/runtime stage while preserving learned parameters and optimizer."""
-    expected = metadata_for(config)
-    for key in ("checkpoint_version", "input_schema", "rules_version"):
-        if metadata.get(key) != expected[key]:
-            raise ValueError(f"Incompatible checkpoint {key}")
-    validate_training_objective(metadata)
-    previous = metadata.get("config", {})
-    if previous.get("model") != expected["config"]["model"]:
-        raise ValueError("A stage transition cannot change the model or support")
-    for key in ("learning_rate", "ema_decay"):
-        if previous.get("training", {}).get(key) != expected["config"]["training"][key]:
-            raise ValueError(f"A stage transition cannot change {key}")
-
-
-def validate_training_objective(metadata: dict, *, allow_loss_change=False) -> None:
-    objective = checkpoint_objective(metadata)
-    if objective == TRAINING_OBJECTIVE:
-        return
-    if allow_loss_change and objective == LEGACY_OBJECTIVE:
-        return
-    raise ValueError(
-        "Incompatible training objective; CE continuation requires --loss-transition"
-    )
-
-
-def load_checkpoint(
-    path: str | Path,
-    config,
-    *,
-    stage_transition=False,
-    ema_decay_transition=False,
-    loss_transition=False,
-    for_inference=False,
-) -> dict:
-    if sum((stage_transition, ema_decay_transition, loss_transition)) > 1:
-        raise ValueError("Training transitions must be separate")
-    if for_inference and any((stage_transition, ema_decay_transition, loss_transition)):
-        raise ValueError("Inference loading cannot apply a training transition")
-    # Only load this task's locally produced files: optimizer/RNG state requires pickle.
+def load_checkpoint(path: str | Path, config: Config) -> dict:
+    # Locally produced checkpoints contain optimizer and RNG state requiring pickle.
     state = torch.load(path, map_location="cpu", weights_only=False)
-    if stage_transition:
-        validate_stage_transition(state["metadata"], config)
-    else:
-        validate_checkpoint_metadata(
-            state["metadata"],
-            config,
-            allow_ema_decay_change=ema_decay_transition,
-            allow_loss_change=loss_transition or for_inference,
-            allow_loss_learning_rate_change=loss_transition,
-        )
+    validate_checkpoint_metadata(state["metadata"], config)
     saved_support = state["support"]
     expected_support = (
         torch.arange(config.model.support_points, dtype=torch.float64)
         / (config.model.support_points - 1)
     ).float()
-    # linspace differs by one float32 rounding unit between PyTorch versions and devices.
-    # Retain the stored values while requiring the same uniformly spaced probability support.
+    # Keep the saved FP32 support; uniformly spaced values may differ by one rounding unit.
     if (
         not isinstance(saved_support, torch.Tensor)
         or saved_support.dtype != torch.float32
@@ -194,3 +127,42 @@ def load_checkpoint(
     ):
         raise ValueError("Incompatible categorical support")
     return state
+
+
+def restore_training_state(
+    path: str | Path, config: Config, state: TrainingState
+) -> None:
+    saved = load_checkpoint(path, config)
+    state.model.load_state_dict(saved["model"])
+    state.ema.load_state_dict(saved["ema"])
+    state.optimizer.load_state_dict(saved["optimizer"])
+    state.support = saved["support"].to(config.device)
+    state.step = saved["step"]
+    state.completed_units = saved["completed_units"]
+    state.validation_history = saved["validation_history"]
+    restore_rng(saved["rng"])
+
+
+def save_training_state(
+    path: str | Path,
+    config: Config,
+    state: TrainingState,
+    environment: dict,
+    reason: str,
+) -> None:
+    save_checkpoint(
+        path,
+        {
+            "metadata": metadata_for(config),
+            "model": state.model.state_dict(),
+            "ema": state.ema.state_dict(),
+            "optimizer": state.optimizer.state_dict(),
+            "rng": capture_rng(),
+            "step": state.step,
+            "completed_units": state.completed_units,
+            "support": state.support.detach().cpu(),
+            "validation_history": state.validation_history,
+            "environment": environment,
+            "save_reason": reason,
+        },
+    )

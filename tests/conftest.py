@@ -16,7 +16,7 @@ def state_with(*, live=1, blank=1, actor=0, hp=(4, 4), inventory0=(), inventory1
     state.ammo = n.make_reload_belief(live, blank)
     for player, items in enumerate((inventory0, inventory1)):
         state.player(player).hp = hp[player]
-        counts = [0] * 8
+        counts = [0] * (n.FEATURE_SCHEMA.item_vocabulary_size - n.FEATURE_SCHEMA.first_item_id)
         for item in items:
             counts[int(item)] += 1
         state.player(player).inventory = counts

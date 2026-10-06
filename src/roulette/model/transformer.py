@@ -2,7 +2,7 @@ import torch
 from torch import nn
 from torch.nn import functional as F
 
-from .encoding import FeatureEncoder
+from .encoding import FEATURE_SCHEMA, FeatureEncoder
 
 
 class EncoderBlock(nn.Module):
@@ -45,7 +45,10 @@ class ValueTransformer(nn.Module):
     def forward(self, tokens: torch.Tensor) -> torch.Tensor:
         for block in self.blocks:
             tokens = block(tokens)
-        return self.value_head(self.output_norm(tokens[:, 0]).float()).float()
+        global_representation = self.output_norm(
+            tokens[:, FEATURE_SCHEMA.global_token_index]
+        )
+        return self.value_head(global_representation.float()).float()
 
     def predict_logits(self, features: torch.Tensor) -> torch.Tensor:
         return self(self.encoder(features))

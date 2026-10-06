@@ -5,7 +5,7 @@
 namespace roulette {
 struct AmmoBelief {
     int rounds = 0;
-    std::array<std::uint64_t, 18> weights{};
+    std::array<std::uint64_t, ammo_hypothesis_count> weights{};
     bool operator==(const AmmoBelief &) const = default;
 };
 std::uint64_t checked_add(std::uint64_t left, std::uint64_t right);

@@ -50,6 +50,50 @@ std::vector<double> read_value_array(const py::array &array) {
                            : static_cast<const double *>(array.data())[row];
     return values;
 }
+void bind_feature_schema(py::module_ &module) {
+    py::class_<FeatureRange>(module, "FeatureRange")
+        .def_readonly("start", &FeatureRange::start)
+        .def_readonly("count", &FeatureRange::count)
+        .def_property_readonly("stop", &FeatureRange::stop)
+        .def_property_readonly("columns", [](const FeatureRange &range) {
+            return py::slice(range.start, range.stop(), 1);
+        });
+    py::class_<FeatureSchema>(module, "FeatureSchema")
+        .def_readonly_static("global_features", &FeatureSchema::global_features)
+        .def_readonly_static("belief_probabilities", &FeatureSchema::belief_probabilities)
+        .def_readonly_static("player_features", &FeatureSchema::player_features)
+        .def_readonly_static("item_features", &FeatureSchema::item_features)
+        .def_readonly_static("numeric_features", &FeatureSchema::numeric_features)
+        .def_readonly_static("feature_count", &FeatureSchema::feature_count)
+        .def_readonly_static("round_count_column", &FeatureSchema::round_count_column)
+        .def_readonly_static("player_feature_count", &FeatureSchema::player_feature_count)
+        .def_readonly_static("player_count", &FeatureSchema::player_count)
+        .def_readonly_static("actor_player_index", &FeatureSchema::actor_player_index)
+        .def_readonly_static("opponent_player_index", &FeatureSchema::opponent_player_index)
+        .def_readonly_static("hp_field", &FeatureSchema::hp_field)
+        .def_readonly_static("inventory_count_field", &FeatureSchema::inventory_count_field)
+        .def_readonly_static("round_count_limit", &FeatureSchema::round_count_limit)
+        .def_readonly_static("hp_limit", &FeatureSchema::hp_limit)
+        .def_readonly_static("inventory_limit", &FeatureSchema::inventory_limit)
+        .def_readonly_static("empty_item_id", &FeatureSchema::empty_item_id)
+        .def_readonly_static("first_item_id", &FeatureSchema::first_item_id)
+        .def_readonly_static("item_vocabulary_size", &FeatureSchema::item_vocabulary_size)
+        .def_readonly_static("global_token_index", &FeatureSchema::global_token_index)
+        .def_readonly_static("token_count", &FeatureSchema::token_count)
+        .def_readonly_static("token_type_count", &FeatureSchema::token_type_count)
+        .def_readonly_static("owner_role_count", &FeatureSchema::owner_role_count)
+        .def_readonly_static("token_types", &token_types)
+        .def_readonly_static("token_owner_roles", &token_owner_roles)
+        .def("player_columns", [](const FeatureSchema &, int relative_player_index) {
+            other_player(relative_player_index); // Reject an index outside actor/opponent.
+            return FeatureSchema::player_columns(relative_player_index);
+        })
+        .def("inventory_columns", [](const FeatureSchema &, int relative_player_index) {
+            other_player(relative_player_index);
+            return FeatureSchema::inventory_columns(relative_player_index);
+        });
+    module.attr("FEATURE_SCHEMA") = py::cast(FeatureSchema{});
+}
 void bind_types(py::module_ &module) {
     py::enum_<Item>(module, "Item")
         .value("BEER", Item::Beer)
@@ -196,6 +240,7 @@ void bind_search(py::module_ &module) {
 }
 } // namespace
 PYBIND11_MODULE(_native, module) {
+    bind_feature_schema(module);
     bind_types(module);
     bind_search(module);
     module.attr("RULES_VERSION") = rules_version;

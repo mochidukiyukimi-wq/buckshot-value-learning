@@ -16,7 +16,8 @@ from roulette.model.squared_cramer import squared_cramer_loss
 from roulette.model.transformer import build_model
 from roulette.training.ema import initialize_ema, update_ema, freeze_teacher
 from roulette.training.teacher import evaluate_frontier, make_training_batch
-from roulette.training.train import train_step, run_training
+from roulette.training.train import run_training
+from roulette.training.learner import update_model
 from roulette.training.checkpoint import (
     capture_rng,
     restore_rng,
@@ -86,14 +87,21 @@ def test_item_slot_permutation_and_batch_padding_do_not_change_prediction():
     )
     features = encode_states([state])
     permuted = features.copy()
-    permuted[:, 29:36] = permuted[:, 29:36][:, ::-1]
+    actor_item_columns = n.FEATURE_SCHEMA.inventory_columns(
+        n.FEATURE_SCHEMA.actor_player_index
+    ).columns
+    permuted[:, actor_item_columns] = permuted[:, actor_item_columns][:, ::-1]
     with freeze_teacher(model, 0) as teacher:
         single = evaluate_frontier(teacher, features, support, 1)
         padded = evaluate_frontier(teacher, features, support, 32)
         reordered = evaluate_frontier(teacher, permuted, support, 1)
     np.testing.assert_allclose(single, padded, atol=1e-6)
     np.testing.assert_allclose(single, reordered, atol=1e-6)
-    assert model.encoder(torch.from_numpy(features)).shape == (1, 17, 16)
+    assert model.encoder(torch.from_numpy(features)).shape == (
+        1,
+        n.FEATURE_SCHEMA.token_count,
+        model.encoder.global_projection.out_features,
+    )
 
 
 def test_ema_formula_and_active_teacher_lease():
@@ -134,7 +142,7 @@ def test_fixed_teacher_labels_can_be_fitted_with_finite_gradients():
     initial_loss = squared_cramer_loss(model.predict_logits(features), targets).item()
     optimizer = torch.optim.AdamW(model.parameters(), lr=0.01)
     for _ in range(50):
-        metrics = train_step(model, features, values, optimizer, support)
+        metrics = update_model(model, features, values, optimizer, support)
         assert all(np.isfinite(value) for value in metrics.values())
     final_loss = squared_cramer_loss(model.predict_logits(features), targets).item()
     assert final_loss < initial_loss * 0.5
@@ -168,6 +176,11 @@ def test_save_resume_reproduces_training_exactly(tmp_path):
 
 
 def test_failure_still_saves_latest_and_logs_failure(tmp_path):
+    import signal
+
+    previous_handlers = {
+        number: signal.getsignal(number) for number in (signal.SIGINT, signal.SIGTERM)
+    }
     config = tiny_config(tmp_path)
     config.search.max_frontier_nodes = 1
     with pytest.raises(RuntimeError, match="capacity"):
@@ -180,6 +193,10 @@ def test_failure_still_saves_latest_and_logs_failure(tmp_path):
     ]
     assert any(
         event["event"] == "failure" and event["resource_limit"] == 1 for event in events
+    )
+    assert all(
+        signal.getsignal(number) == handler
+        for number, handler in previous_handlers.items()
     )
 
 
@@ -257,33 +274,6 @@ def test_sigint_stops_safely_and_saves_at_exit(tmp_path, monkeypatch):
     assert signal.getsignal(signal.SIGINT) == previous_handler
 
 
-def test_explicit_stage_transition_preserves_step_optimizer_and_ema(tmp_path):
-    original = tiny_config(tmp_path, units=1)
-    run_training(original)
-    before = load_checkpoint(tmp_path / "latest.pt", original)
-    changed = deepcopy(original)
-    changed.sampling.max_initial_shell_type_count = 2
-    changed.training.validation_roots = 3
-    with pytest.raises(ValueError, match="differs"):
-        load_checkpoint(tmp_path / "latest.pt", changed)
-    summary = run_training(changed, resume=True, stage_transition=True)
-    after = load_checkpoint(tmp_path / "latest.pt", changed)
-    assert summary["initial_step"] == summary["step"] == before["step"] == 1
-    assert len(after["stage_lineage"]) == 1
-    assert after["validation_history"][0]["root_count"] == 3
-    for group in ("model", "ema"):
-        for key in before[group]:
-            assert torch.equal(before[group][key], after[group][key])
-    for key, value in before["optimizer"]["state"].items():
-        for field, tensor in value.items():
-            assert torch.equal(tensor, after["optimizer"]["state"][key][field])
-    with pytest.raises(ValueError, match="requires"):
-        run_training(changed, stage_transition=True)
-    changed.model.support_points = 21
-    with pytest.raises(ValueError, match="model or support"):
-        load_checkpoint(tmp_path / "latest.pt", changed, stage_transition=True)
-
-
 def test_resume_preserves_support_rounding_across_runtimes(tmp_path):
     config = tiny_config(tmp_path, units=1)
     run_training(config)
@@ -305,7 +295,6 @@ def test_resume_without_count_limit_passes_previous_limit_and_saves_on_stop(
     tmp_path, monkeypatch
 ):
     import signal
-    from roulette.training import train as train_module
 
     config = tiny_config(tmp_path, units=1)
     run_training(config)
@@ -315,18 +304,22 @@ def test_resume_without_count_limit_passes_previous_limit_and_saves_on_stop(
     config = load_config(config_path)
     assert config.training.generation_units is None
 
-    original_train_step = train_module.train_step
+    from roulette.training import learner as learner_module
+
+    original_update_model = learner_module.update_model
     continued_updates = 0
 
     def stop_after_two_continued_updates(*args, **kwargs):
         nonlocal continued_updates
-        metrics = original_train_step(*args, **kwargs)
+        metrics = original_update_model(*args, **kwargs)
         continued_updates += 1
         if continued_updates == 2:
             signal.raise_signal(signal.SIGTERM)
         return metrics
 
-    monkeypatch.setattr(train_module, "train_step", stop_after_two_continued_updates)
+    monkeypatch.setattr(
+        learner_module, "update_model", stop_after_two_continued_updates
+    )
     summary = run_training(config, resume=True)
     saved = load_checkpoint(tmp_path / "latest.pt", config)
     assert summary["initial_step"] == 1
@@ -337,118 +330,65 @@ def test_resume_without_count_limit_passes_previous_limit_and_saves_on_stop(
     assert saved["metadata"]["config"]["training"]["generation_units"] is None
 
 
-def assert_checkpoint_values_equal(expected, actual):
-    if isinstance(expected, torch.Tensor):
-        assert torch.equal(expected, actual)
-    elif isinstance(expected, np.ndarray):
-        np.testing.assert_array_equal(expected, actual)
-    elif isinstance(expected, dict):
-        assert expected.keys() == actual.keys()
-        for key in expected:
-            assert_checkpoint_values_equal(expected[key], actual[key])
-    elif isinstance(expected, (list, tuple)):
-        assert len(expected) == len(actual)
-        for expected_value, actual_value in zip(expected, actual, strict=True):
-            assert_checkpoint_values_equal(expected_value, actual_value)
-    else:
-        assert expected == actual
+@pytest.mark.parametrize("objective", ["cross_entropy", None])
+def test_checkpoint_requires_current_training_objective(tmp_path, objective):
+    config = tiny_config(tmp_path, units=1)
+    run_training(config)
+    saved = load_checkpoint(tmp_path / "latest.pt", config)
+    saved["metadata"]["training_objective"] = objective
+    save_checkpoint(tmp_path / "latest.pt", saved)
+    with pytest.raises(ValueError, match="training_objective"):
+        load_checkpoint(tmp_path / "latest.pt", config)
 
 
-def test_ema_decay_transition_preserves_state_then_uses_new_decay(
+def test_checkpoint_failure_closes_logs_and_restores_signal_handlers(
     tmp_path, monkeypatch
 ):
+    import signal
     from roulette.training import train as train_module
 
-    original = tiny_config(tmp_path, units=1)
-    run_training(original)
-    before = load_checkpoint(tmp_path / "latest.pt", original)
-    changed = deepcopy(original)
-    changed.training.ema_decay = 0.99
-    with pytest.raises(ValueError, match="differs"):
-        load_checkpoint(tmp_path / "latest.pt", changed)
-    summary = run_training(changed, resume=True, ema_decay_transition=True)
-    after = load_checkpoint(tmp_path / "latest.pt", changed)
-    assert summary["initial_step"] == summary["step"] == before["step"]
-    for field in ("model", "ema", "optimizer", "rng", "support", "validation_history"):
-        assert_checkpoint_values_equal(before[field], after[field])
-    adjustment = after["training_adjustments"][0]
-    assert len(after["training_adjustments"]) == 1
-    assert adjustment["parameter"] == "ema_decay"
-    assert adjustment["previous_value"] == original.training.ema_decay
-    assert adjustment["new_value"] == 0.99
-    assert adjustment["step"] == before["step"]
-    assert adjustment["completed_units"] == before["completed_units"]
-    assert after["metadata"]["config"]["training"]["ema_decay"] == 0.99
-    events = [
-        json.loads(line)
-        for line in (tmp_path / "metrics.jsonl").read_text().splitlines()
-    ]
-    assert sum(event["event"] == "training_adjustment" for event in events) == 1
+    previous_handler = signal.getsignal(signal.SIGINT)
+    closed_logs = []
+    original_close = train_module.RunLogger.close
 
-    applied_decays = []
-    original_update_ema = train_module.update_ema
+    def record_close(logger):
+        original_close(logger)
+        closed_logs.append(logger)
 
-    def check_new_ema_formula(ema, model, decay):
-        previous_parameters = [parameter.clone() for parameter in ema.parameters()]
-        original_update_ema(ema, model, decay)
-        applied_decays.append(decay)
-        for previous, current, averaged in zip(
-            previous_parameters, model.parameters(), ema.parameters(), strict=True
-        ):
-            torch.testing.assert_close(averaged, 0.99 * previous + 0.01 * current)
+    def fail_checkpoint(*args, **kwargs):
+        raise OSError("checkpoint write failed")
 
-    monkeypatch.setattr(train_module, "update_ema", check_new_ema_formula)
-    changed.training.generation_units = 2
-    continued = run_training(changed, resume=True)
-    latest = load_checkpoint(tmp_path / "latest.pt", changed)
-    assert continued["initial_step"] == before["step"]
-    assert continued["step"] > before["step"]
-    assert applied_decays == [0.99]
-    assert latest["training_adjustments"] == after["training_adjustments"]
-    assert len(list(tmp_path.glob("*.pt"))) == 1
+    monkeypatch.setattr(train_module.RunLogger, "close", record_close)
+    monkeypatch.setattr(train_module, "save_training_state", fail_checkpoint)
+    with pytest.raises(OSError, match="checkpoint write failed"):
+        run_training(tiny_config(tmp_path))
+    assert len(closed_logs) == 1
+    assert closed_logs[0].jsonl.closed
+    assert signal.getsignal(signal.SIGINT) == previous_handler
 
 
-@pytest.mark.parametrize(
-    "configuration_field,new_value",
-    [
-        ("training.learning_rate", 0.0002),
-        ("sampling.max_initial_shell_type_count", 2),
-        ("model.support_points", 21),
-        ("seed", 123),
-        ("device", "cuda"),
-    ],
-)
-def test_ema_decay_transition_rejects_other_configuration_changes(
-    tmp_path, configuration_field, new_value
-):
-    original = tiny_config(tmp_path, units=1)
-    run_training(original)
-    changed = deepcopy(original)
-    changed.training.ema_decay = 0.99
-    field_parts = configuration_field.split(".")
-    target = changed
-    for field in field_parts[:-1]:
-        target = getattr(target, field)
-    setattr(target, field_parts[-1], new_value)
-    with pytest.raises(ValueError, match="differs"):
-        load_checkpoint(tmp_path / "latest.pt", changed, ema_decay_transition=True)
-
-
-def test_ema_decay_transition_requires_resume_and_separate_stage(tmp_path):
-    from roulette.cli import build_parser
-
-    config = tiny_config(tmp_path)
-    with pytest.raises(ValueError, match="requires --resume"):
-        run_training(config, ema_decay_transition=True)
-    with pytest.raises(ValueError, match="must be separate"):
-        run_training(
-            config, resume=True, stage_transition=True, ema_decay_transition=True
-        )
-    with pytest.raises(SystemExit):
-        build_parser().parse_args(
-            ["train", "--resume", "--stage-transition", "--ema-decay-transition"]
-        )
-    arguments = build_parser().parse_args(
-        ["train", "--resume", "--ema-decay-transition"]
+def test_nonfinite_gradient_does_not_update_model_or_optimizer():
+    model = tiny_model()
+    optimizer = torch.optim.AdamW(model.parameters())
+    before = [parameter.detach().clone() for parameter in model.parameters()]
+    parameter = next(model.parameters())
+    hook = parameter.register_hook(
+        lambda gradient: torch.full_like(gradient, float("nan"))
     )
-    assert arguments.resume and arguments.ema_decay_transition
+    try:
+        features = torch.from_numpy(encode_states([state_with()]))
+        with pytest.raises(FloatingPointError, match="Non-finite gradient"):
+            update_model(
+                model,
+                features,
+                torch.tensor([0.5]),
+                optimizer,
+                torch.linspace(0, 1, 11),
+            )
+    finally:
+        hook.remove()
+    assert all(
+        torch.equal(saved, current)
+        for saved, current in zip(before, model.parameters(), strict=True)
+    )
+    assert not optimizer.state

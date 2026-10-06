@@ -50,8 +50,9 @@ def test_unknown_inversion_does_not_encode_realized_count():
     state = state_with(live=4, blank=4, inventory0=(n.Item.INVERTER,))
     (outcome,) = n.collect_successors(state, n.make_item_use(n.Item.INVERTER))
     features = n.encode_states([outcome.state])[0]
-    assert np.count_nonzero(features[1:19]) == 2
-    assert np.isclose(features[1:19].sum(), 1)
+    belief_columns = n.FEATURE_SCHEMA.belief_probabilities.columns
+    assert np.count_nonzero(features[belief_columns]) == 2
+    assert np.isclose(features[belief_columns].sum(), 1)
     assert any(
         weight and index // 2 == 5
         for index, weight in enumerate(outcome.state.ammo.weights)

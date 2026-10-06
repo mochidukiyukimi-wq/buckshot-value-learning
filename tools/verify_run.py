@@ -18,8 +18,8 @@ from roulette.evaluation.matches import (
     evaluate_matches,
 )
 from roulette.model.transformer import build_model
-from roulette.training.checkpoint import load_checkpoint, checkpoint_objective
-from roulette.training.train import configure_runtime
+from roulette.training.checkpoint import load_checkpoint, TRAINING_OBJECTIVE
+from roulette.runtime import configure_runtime
 
 
 def verify_run(config_path):
@@ -27,8 +27,8 @@ def verify_run(config_path):
     configure_runtime(config)
     directory = Path(config.run_dir)
     checkpoint_path = directory / "latest.pt"
-    saved = load_checkpoint(checkpoint_path, config, for_inference=True)
-    loss_tag = "training/" + checkpoint_objective(saved["metadata"])
+    saved = load_checkpoint(checkpoint_path, config)
+    loss_tag = "training/" + TRAINING_OBJECTIVE
     if list(directory.glob("*.pt")) != [checkpoint_path]:
         raise RuntimeError(
             "Run directory contains checkpoint history instead of just latest.pt"
