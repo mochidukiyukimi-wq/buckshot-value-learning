@@ -25,6 +25,12 @@ L=\frac{0.01}{B}\sum_{s=1}^{B}\sum_{k=0}^{99}
 
 $F$ denotes the binwise CDF and $B$ the batch size. The final bin is excluded; bins are summed and states are averaged. Softmax, CDF, and loss use FP32. Targets are detached. AdamW updates the learner, followed by an EMA update.
 
+## Trained model
+
+Final TSUBAME checkpoint: [latest.pt](models/latest.pt).
+
+![TSUBAME training statistics](models/training.png)
+
 ## Run
 
 Requires Python 3.11+ and a C++20 toolchain. On Windows, use Visual Studio's developer PowerShell. Resume uses the current Cramér checkpoint format.
